@@ -10,7 +10,8 @@
 #  --------
 #  This script securely removes the old operating system files from the microSD
 #  card after a successful migration to an NVMe SSD. This is a security-hardening
-#  step to ensure there isn't a dormant, un-updated OS on the boot media.
+#  step to ensure there isn't a dormant, un-updated OS on the boot media that
+#  could be exploited by an attacker with physical access.
 #
 #  Workflow:
 #  ---------
@@ -74,7 +75,9 @@ print_success "Running as root."
 
 # 2. CRITICAL SAFETY CHECK: Verify we are booted from the SSD.
 # We find the device that is mounted as the root ('/') filesystem.
-# If it's not an NVMe device, we MUST abort to prevent self-destruction.
+# If it's not an NVMe device, we MUST abort. Running this script while booted
+# from the microSD card would be a "self-destruct" command, as it would
+# delete the OS it is currently running from.
 print_info "Verifying that the system is running from the NVMe SSD..."
 CURRENT_ROOT_DEV=$(findmnt -n -o SOURCE /)
 if [[ "$CURRENT_ROOT_DEV" != *"nvme"* ]]; then
@@ -90,13 +93,16 @@ print_success "System is correctly booted from the SSD. It is safe to proceed."
 
 print_border "Step 1: Clean Up microSD Card"
 
-# The microSD card is always at this device path on a Jetson.
+# In Linux on Jetson devices, `/dev/mmcblk0` represents the microSD card device,
+# and `p1` refers to the first partition on that device.
 MICROSD_PARTITION="/dev/mmcblk0p1"
+# `-b` checks if the file exists AND is a block special file (i.e., a storage device).
 if [ ! -b "$MICROSD_PARTITION" ]; then
     print_error "Could not find the microSD card partition at $MICROSD_PARTITION."
     exit 1
 fi
 
+# We will temporarily mount the microSD partition here to access its files.
 MOUNT_POINT="/mnt/microsd_rootfs"
 
 echo -e "${C_RED}!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!${C_RESET}"
@@ -112,14 +118,24 @@ fi
 
 echo "Mounting $MICROSD_PARTITION to $MOUNT_POINT..."
 mkdir -p "$MOUNT_POINT"
-# We add a check to see if it's already mounted to prevent errors.
+# `mountpoint -q` is a quiet check to see if a directory is already a mount point.
+# This prevents an error if the script was run before and failed to unmount.
 if ! mountpoint -q "$MOUNT_POINT"; then
     mount "$MICROSD_PARTITION" "$MOUNT_POINT"
 fi
 
 echo "Deleting all files and directories from microSD except '/boot'..."
-# This command finds all items in the top-level of the mounted directory.
-# For every item that is NOT named 'boot', it executes 'rm -rf' on it.
+# This is the core command for the cleanup. Let's break it down:
+# `find "$MOUNT_POINT"`: Start searching in the mounted microSD directory.
+# `-mindepth 1 -maxdepth 1`: This is crucial. It tells `find` to only look at
+#   the items *directly inside* the mount point (e.g., /mnt/microsd_rootfs/etc)
+#   but not the mount point itself or anything deeper.
+# `-not -name "boot"`: This tells `find` to EXCLUDE any item named "boot".
+#   This is what preserves the critical boot files.
+# `-exec rm -rf {} +`: For all items found, execute the `rm -rf` command.
+#   `{}` is replaced with the found file/directory names. The `+` at the end
+#   is an optimization that groups many filenames into a single `rm` command,
+#   which is more efficient than running `rm` once for every single file.
 find "$MOUNT_POINT" -mindepth 1 -maxdepth 1 -not -name "boot" -exec rm -rf {} +
 print_success "Old OS files have been deleted."
 
