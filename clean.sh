@@ -21,10 +21,10 @@
 #
 #  What it does:
 #  -------------
-#  ✅ Verifies that the system is currently running from the NVMe SSD.
-#  ✅ Mounts the microSD card's primary partition.
-#  ✅ Deletes all files and directories from the microSD card EXCEPT for the
-#     critical `/boot` directory, which is required for the system to start.
+#  - Verifies that the system is currently running from the NVMe SSD.
+#  - Mounts the microSD card's primary partition.
+#  - Deletes all files and directories from the microSD card EXCEPT for the
+#    critical `/boot` directory, which is required for the system to start.
 #
 # ====================================================================================
 
@@ -39,17 +39,17 @@ readonly C_YELLOW='\033[0;33m'
 
 # Prints a message in green (for success).
 print_success() {
-    echo -e "${C_GREEN}✅ $1${C_RESET}"
+    echo -e "${C_GREEN}[OK] $1${C_RESET}"
 }
 
 # Prints a message in red (for errors).
 print_error() {
-    echo -e "${C_RED}❌ ERROR: $1${C_RESET}"
+    echo -e "${C_RED}[ERROR] $1${C_RESET}"
 }
 
 # Prints a message in yellow (for warnings/info).
 print_info() {
-    echo -e "${C_YELLOW}ℹ️  $1${C_RESET}"
+    echo -e "${C_YELLOW}[INFO] $1${C_RESET}"
 }
 
 # Prints a decorative border with a title.
@@ -103,31 +103,32 @@ echo -e "${C_RED}!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!${
 echo -e "${C_YELLOW}This script will permanently delete the old OS from the microSD card.${C_RESET}"
 echo -e "${C_YELLOW}The essential /boot directory WILL BE PRESERVED.${C_RESET}"
 echo -e "${C_RED}This action cannot be undone.${C_RESET}"
-read -p "➡️ To confirm, please type 'yes': " confirm_wipe
+read -p "> To confirm, please type 'yes': " confirm_wipe
 
 if [[ "$confirm_wipe" != "yes" ]]; then
     print_info "Cleanup aborted by user. No files were deleted."
     exit 1
 fi
 
-echo "🔧 Mounting $MICROSD_PARTITION to $MOUNT_POINT..."
+echo "Mounting $MICROSD_PARTITION to $MOUNT_POINT..."
 mkdir -p "$MOUNT_POINT"
 # We add a check to see if it's already mounted to prevent errors.
 if ! mountpoint -q "$MOUNT_POINT"; then
     mount "$MICROSD_PARTITION" "$MOUNT_POINT"
 fi
 
-echo "🗑️ Deleting all files and directories from microSD except '/boot'..."
+echo "Deleting all files and directories from microSD except '/boot'..."
 # This command finds all items in the top-level of the mounted directory.
 # For every item that is NOT named 'boot', it executes 'rm -rf' on it.
 find "$MOUNT_POINT" -mindepth 1 -maxdepth 1 -not -name "boot" -exec rm -rf {} +
 print_success "Old OS files have been deleted."
 
 # --- Final Steps ---
-print_border "🎉 Cleanup Complete! 🎉"
+print_border "Cleanup Complete"
 echo "Unmounting the microSD card partition..."
 umount "$MOUNT_POINT"
 rmdir "$MOUNT_POINT"
 print_success "The microSD card is now a minimal boot device."
 print_success "Your Jetson setup is fully and securely configured."
+
 

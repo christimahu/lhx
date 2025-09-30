@@ -22,12 +22,13 @@
 #
 #  What it does:
 #  -------------
-#  ✅ Checks if setup is already complete and exits safely if so.
-#  ✅ Configures a static IP address for reliable network access.
-#  ✅ (Optional) Migrates the entire operating system to a faster SSD.
-#  ✅ Removes the Ubuntu Desktop environment for a minimal, secure server.
-#  ✅ Disables swap memory, a requirement for Kubernetes.
-#  ✅ Updates the remaining system packages to the latest versions.
+#  - Checks if setup is already complete and exits safely if so.
+#  - Configures a static IP address for reliable network access.
+#  - (Optional) Sets a descriptive hostname for the node.
+#  - Removes the Ubuntu Desktop environment for a minimal, secure server.
+#  - Disables swap memory, a requirement for Kubernetes.
+#  - (Optional) Migrates the now-minimized operating system to a faster SSD.
+#  - Updates the remaining system packages to the latest versions.
 #
 # ====================================================================================
 
@@ -41,17 +42,17 @@ readonly C_YELLOW='\033[0;33m'
 
 # Prints a message in green (for success).
 print_success() {
-    echo -e "${C_GREEN}✅ $1${C_RESET}"
+    echo -e "${C_GREEN}[OK] $1${C_RESET}"
 }
 
 # Prints a message in red (for errors).
 print_error() {
-    echo -e "${C_RED}❌ ERROR: $1${C_RESET}"
+    echo -e "${C_RED}[ERROR] $1${C_RESET}"
 }
 
 # Prints a message in yellow (for warnings/info).
 print_info() {
-    echo -e "${C_YELLOW}ℹ️  $1${C_RESET}"
+    echo -e "${C_YELLOW}[INFO] $1${C_RESET}"
 }
 
 # Prints a decorative border with a title.
@@ -110,13 +111,11 @@ if [[ -z "$CONNECTION_NAME" ]]; then
     exit 1
 fi
 
-# Check if a static IP is already configured. This is unlikely given the previous check,
-# but it is a good secondary safety measure.
+# Check if a static IP is already configured.
 METHOD=$(nmcli -g ipv4.method con show "$CONNECTION_NAME")
 if [[ "$METHOD" == "manual" ]]; then
     CURRENT_IP=$(nmcli -g IP4.ADDRESS con show "$CONNECTION_NAME" | cut -d'/' -f1)
     print_success "Static IP is already configured: $CURRENT_IP"
-    # Set STATIC_IP variable for the final summary message.
     STATIC_IP=$CURRENT_IP
 else
     print_info "A server needs a permanent, predictable IP address. We'll now configure one."
@@ -134,25 +133,74 @@ else
     echo "  - Worker Nodes:   $SUBNET.200 - $SUBNET.239"
     echo ""
 
-    read -p "➡️ Enter the last number (octet) for this node's static IP (200-249): " ip_octet
+    read -p "> Enter the last number (octet) for this node's static IP (200-249): " ip_octet
     if ! [[ "$ip_octet" =~ ^[0-9]+$ ]] || [[ "$ip_octet" -lt 200 || "$ip_octet" -gt 249 ]]; then
         print_error "Invalid input. You must enter a number between 200 and 249."
         exit 1
     fi
 
     STATIC_IP="$SUBNET.$ip_octet"
-    echo "🔧 Setting static IP to $STATIC_IP..."
+    echo "Configuring static IP to $STATIC_IP..."
     nmcli con mod "$CONNECTION_NAME" ipv4.method manual ipv4.addresses "${STATIC_IP}/24" ipv4.gateway "$GATEWAY_IP" ipv4.dns "8.8.8.8,8.8.4.4"
     nmcli con down "$CONNECTION_NAME" > /dev/null 2>&1 && nmcli con up "$CONNECTION_NAME" > /dev/null 2>&1
     sleep 2 # Give the network a moment to stabilize.
     print_success "Static IP configured. SSH will be available at: $STATIC_IP"
 fi
 
-# --- Part 2: OS Migration to NVMe SSD ---
+# --- Part 2: System Customization & Hardening ---
 
-print_border "Step 2: Migrate OS from microSD to NVMe SSD"
+print_border "Step 2: System Customization & Hardening"
+
+# Optional: Set a custom hostname for the node.
+CURRENT_HOSTNAME=$(hostname)
+print_info "The current hostname is '$CURRENT_HOSTNAME'."
+read -p "> Do you want to set a new hostname for this node? (Y/N): " confirm_hostname
+if [[ "$confirm_hostname" == "Y" || "$confirm_hostname" == "y" ]]; then
+    read -p "> Enter the new hostname (e.g., k8s-worker-1): " new_hostname
+    if [ -z "$new_hostname" ]; then
+        print_error "Hostname cannot be empty. Skipping."
+    else
+        echo "Setting hostname to '$new_hostname'..."
+        # Set the new hostname system-wide.
+        hostnamectl set-hostname "$new_hostname"
+        # Update /etc/hosts to reflect the change. This is crucial for 'sudo' to work correctly without issues.
+        sed -i "s/127.0.1.1.*$CURRENT_HOSTNAME/127.0.1.1\t$new_hostname/g" /etc/hosts
+        print_success "Hostname has been set to '$new_hostname'."
+    fi
+else
+    print_info "Skipping hostname change."
+fi
+echo ""
+
+print_info "To create a lean, secure server, we will remove the desktop GUI and related applications."
+read -p "> Remove the full desktop environment? (Highly Recommended) (Y/N): " confirm_remove
+if [[ "$confirm_remove" == "Y" || "$confirm_remove" == "y" ]]; then
+    echo "Setting boot target to command-line..."
+    systemctl set-default multi-user.target
+    echo "Removing desktop packages... This may take a few minutes."
+    apt-get remove --purge ubuntu-desktop -y && apt-get autoremove --purge -y
+    print_success "Desktop environment removed. System will now boot to terminal."
+else
+    print_info "Skipping desktop removal. The GUI will remain installed."
+fi
+echo ""
+
+print_info "Kubernetes requires swap memory to be disabled for performance and stability."
+read -p "> Disable swap? (This is required for Kubernetes) (Y/N): " confirm_swap
+if [[ "$confirm_swap" == "Y" || "$confirm_swap" == "y" ]]; then
+    swapoff -a
+    sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+    print_success "Swap has been disabled."
+else
+    print_info "Swap not disabled. Note: 'kubeadm init' will fail until this is done."
+fi
+echo ""
+
+# --- Part 3: OS Migration to NVMe SSD ---
+
+print_border "Step 3: Migrate OS from microSD to NVMe SSD"
 print_info "Running the OS from an SSD is much faster and more reliable than a microSD card."
-read -p "➡️ Do you want to migrate the OS to an NVMe SSD now? (Y/N): " confirm_migrate
+read -p "> Do you want to migrate the now-minimized OS to an NVMe SSD? (Y/N): " confirm_migrate
 
 if [[ "$confirm_migrate" != "Y" && "$confirm_migrate" != "y" ]]; then
     print_info "Skipping OS migration. The system will continue to run from the microSD card."
@@ -167,12 +215,12 @@ else
         echo -e "${C_RED}!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!${C_RESET}"
         echo -e "${C_YELLOW}This next step will completely and IRREVERSIBLY ERASE all data on the SSD.${C_RESET}"
         echo -e "${C_RED}!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!${C_RESET}"
-        read -p "To confirm, please type 'yes': " confirm_erase
+        read -p "> To confirm, please type 'yes': " confirm_erase
 
         if [[ "$confirm_erase" != "yes" ]]; then
             print_info "Migration aborted by user. The SSD was not touched."
         else
-            echo "🔧 Preparing the SSD..."
+            echo "Preparing the SSD..."
             parted -s "$SSD_DEVICE" mklabel gpt
             parted -s "$SSD_DEVICE" mkpart primary ext4 0% 100%
             sleep 3 # Wait for the kernel to recognize the new partition.
@@ -180,7 +228,7 @@ else
             mkfs.ext4 "$SSD_PARTITION"
             print_success "SSD has been partitioned and formatted."
             
-            echo "🔧 Cloning filesystem. This will take several minutes..."
+            echo "Cloning filesystem. This will take several minutes..."
             MOUNT_POINT="/mnt/ssd_root"
             mkdir -p "$MOUNT_POINT"
             mount "$SSD_PARTITION" "$MOUNT_POINT"
@@ -188,7 +236,7 @@ else
             rsync -axHAWX --numeric-ids --info=progress2 --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} / "$MOUNT_POINT"
             print_success "Filesystem cloned successfully."
             
-            echo "🔧 Updating boot configuration to use the SSD..."
+            echo "Updating boot configuration to use the SSD..."
             SSD_UUID=$(blkid -s UUID -o value "$SSD_PARTITION")
             if [ -z "$SSD_UUID" ]; then
                 print_error "Could not determine the SSD's UUID. Cannot update boot config."
@@ -203,39 +251,11 @@ else
     fi
 fi
 
-# --- Part 3: System Minimization & Kubernetes Preparation ---
-
-print_border "Step 3: System Minimization & Hardening"
-
-print_info "To create a lean, secure server, we will remove the desktop GUI and related applications."
-read -p "➡️ Remove the full desktop environment? (Highly Recommended) (Y/N): " confirm_remove
-if [[ "$confirm_remove" == "Y" || "$confirm_remove" == "y" ]]; then
-    echo "🔧 Setting boot target to command-line..."
-    systemctl set-default multi-user.target
-    echo "🗑️ Removing desktop packages... This may take a few minutes."
-    apt-get remove --purge ubuntu-desktop -y && apt-get autoremove --purge -y
-    print_success "Desktop environment removed. System will now boot to terminal."
-else
-    print_info "Skipping desktop removal. The GUI will remain installed."
-fi
-echo ""
-
-print_info "Kubernetes requires swap memory to be disabled for performance and stability."
-read -p "➡️ Disable swap? (This is required for Kubernetes) (Y/N): " confirm_swap
-if [[ "$confirm_swap" == "Y" || "$confirm_swap" == "y" ]]; then
-    swapoff -a
-    sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
-    print_success "Swap has been disabled."
-else
-    print_info "Swap not disabled. Note: 'kubeadm init' will fail until this is done."
-fi
-echo ""
-
 # --- Part 4: System Updates ---
 
 print_border "Step 4: System Updates"
 print_info "Applying latest security patches and software updates to the minimal system."
-read -p "➡️ Run 'apt update' and 'apt upgrade' now? (Recommended) (Y/N): " confirm_update
+read -p "> Run 'apt update' and 'apt upgrade' now? (Recommended) (Y/N): " confirm_update
 if [[ "$confirm_update" == "Y" || "$confirm_update" == "y" ]]; then
     apt-get update && apt-get upgrade -y
     print_success "System is now up to date."
@@ -245,7 +265,7 @@ fi
 
 # --- Final Instructions ---
 
-print_border "🎉 Initial Setup Complete! 🎉"
+print_border "Initial Setup Complete"
 echo "The system is now configured. A reboot is required to apply all changes."
 echo "After rebooting:"
 # We need to re-check if migration was performed to give the right instructions.
