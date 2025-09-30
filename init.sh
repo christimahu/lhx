@@ -22,10 +22,10 @@
 #
 #  What it does:
 #  -------------
+#  ✅ Checks if setup is already complete and exits safely if so.
 #  ✅ Configures a static IP address for reliable network access.
-#  ✅ (Optional) Migrates the entire operating system to a faster, more
-#     durable NVMe SSD. This step is automatically skipped if already done.
-#  ✅ Removes the entire Ubuntu Desktop environment for a minimal, secure server.
+#  ✅ (Optional) Migrates the entire operating system to a faster SSD.
+#  ✅ Removes the Ubuntu Desktop environment for a minimal, secure server.
 #  ✅ Disables swap memory, a requirement for Kubernetes.
 #  ✅ Updates the remaining system packages to the latest versions.
 #
@@ -67,7 +67,6 @@ print_border() {
 print_border "Step 0: Pre-flight Checks"
 
 # 1. Check if the script is run as root.
-# Most operations in this script require administrative privileges.
 if [ "$(id -u)" -ne 0 ]; then
     print_error "This script must be run with root privileges. Please use 'sudo'."
     exit 1
@@ -75,17 +74,27 @@ fi
 print_success "Running as root."
 
 # 2. Check for an active internet connection.
-# We need this to download system updates.
 if ! ping -c 1 -W 3 google.com &> /dev/null; then
     print_error "No internet connection detected. Please check your network cable and connection."
     exit 1
 fi
 print_success "Internet connection is active."
 
+# 3. CRITICAL SAFETY CHECK: Verify that this script has not already been run.
+# If the system is already booting from an NVMe device, we assume setup is complete.
+print_info "Checking current boot device..."
+CURRENT_ROOT_DEV=$(findmnt -n -o SOURCE /)
+if [[ "$CURRENT_ROOT_DEV" == *"nvme"* ]]; then
+    print_success "System is already running from the NVMe SSD."
+    print_info "It appears the initial setup has already been completed. Exiting now to prevent accidental changes."
+    exit 0 # Exit successfully.
+fi
+print_success "System is running from microSD card. Proceeding with setup."
+
+
 # --- Part 1: Network Configuration ---
 
 print_border "Step 1: Network Configuration (Static IP)"
-print_info "A server needs a permanent, predictable IP address. We'll now configure one."
 
 # Automatically detect the primary network interface (e.g., enP8p1s0).
 INTERFACE=$(ip route | awk '/default/ {print $5; exit}')
@@ -101,104 +110,94 @@ if [[ -z "$CONNECTION_NAME" ]]; then
     exit 1
 fi
 
-GATEWAY_IP=$(ip route | awk '/default/ {print $3; exit}')
-SUBNET=$(ip -o -f inet addr show "$INTERFACE" | awk '/scope global/ {print $4}' | cut -d'/' -f1 | cut -d'.' -f1-3)
+# Check if a static IP is already configured. This is unlikely given the previous check,
+# but it is a good secondary safety measure.
+METHOD=$(nmcli -g ipv4.method con show "$CONNECTION_NAME")
+if [[ "$METHOD" == "manual" ]]; then
+    CURRENT_IP=$(nmcli -g IP4.ADDRESS con show "$CONNECTION_NAME" | cut -d'/' -f1)
+    print_success "Static IP is already configured: $CURRENT_IP"
+    # Set STATIC_IP variable for the final summary message.
+    STATIC_IP=$CURRENT_IP
+else
+    print_info "A server needs a permanent, predictable IP address. We'll now configure one."
+    GATEWAY_IP=$(ip route | awk '/default/ {print $3; exit}')
+    SUBNET=$(ip -o -f inet addr show "$INTERFACE" | awk '/scope global/ {print $4}' | cut -d'/' -f1 | cut -d'.' -f1-3)
 
-echo "Detected Network Details:"
-echo "  - Connection Name: '$CONNECTION_NAME' on Interface '$INTERFACE'"
-echo "  - Network Subnet:  $SUBNET.0/24"
-echo "  - Network Gateway: $GATEWAY_IP"
-echo ""
-print_info "Kubernetes nodes are typically assigned IPs in a reserved range."
-echo "Suggested IP scheme:"
-echo "  - Control Planes: $SUBNET.240 - $SUBNET.249"
-echo "  - Worker Nodes:   $SUBNET.200 - $SUBNET.239"
-echo ""
+    echo "Detected Network Details:"
+    echo "  - Connection Name: '$CONNECTION_NAME' on Interface '$INTERFACE'"
+    echo "  - Network Subnet:  $SUBNET.0/24"
+    echo "  - Network Gateway: $GATEWAY_IP"
+    echo ""
+    print_info "Kubernetes nodes are typically assigned IPs in a reserved range."
+    echo "Suggested IP scheme:"
+    echo "  - Control Planes: $SUBNET.240 - $SUBNET.249"
+    echo "  - Worker Nodes:   $SUBNET.200 - $SUBNET.239"
+    echo ""
 
-read -p "➡️ Enter the last number (octet) for this node's static IP (200-249): " ip_octet
-if ! [[ "$ip_octet" =~ ^[0-9]+$ ]] || [[ "$ip_octet" -lt 200 || "$ip_octet" -gt 249 ]]; then
-    print_error "Invalid input. You must enter a number between 200 and 249."
-    exit 1
+    read -p "➡️ Enter the last number (octet) for this node's static IP (200-249): " ip_octet
+    if ! [[ "$ip_octet" =~ ^[0-9]+$ ]] || [[ "$ip_octet" -lt 200 || "$ip_octet" -gt 249 ]]; then
+        print_error "Invalid input. You must enter a number between 200 and 249."
+        exit 1
+    fi
+
+    STATIC_IP="$SUBNET.$ip_octet"
+    echo "🔧 Setting static IP to $STATIC_IP..."
+    nmcli con mod "$CONNECTION_NAME" ipv4.method manual ipv4.addresses "${STATIC_IP}/24" ipv4.gateway "$GATEWAY_IP" ipv4.dns "8.8.8.8,8.8.4.4"
+    nmcli con down "$CONNECTION_NAME" > /dev/null 2>&1 && nmcli con up "$CONNECTION_NAME" > /dev/null 2>&1
+    sleep 2 # Give the network a moment to stabilize.
+    print_success "Static IP configured. SSH will be available at: $STATIC_IP"
 fi
-
-STATIC_IP="$SUBNET.$ip_octet"
-echo "🔧 Setting static IP to $STATIC_IP..."
-
-# Use 'nmcli', the command-line tool for NetworkManager, to configure the connection.
-nmcli con mod "$CONNECTION_NAME" ipv4.method manual ipv4.addresses "${STATIC_IP}/24" ipv4.gateway "$GATEWAY_IP" ipv4.dns "8.8.8.8,8.8.4.4"
-
-# Restart the connection to apply the new settings. A brief network flicker is normal.
-nmcli con down "$CONNECTION_NAME" > /dev/null 2>&1 && nmcli con up "$CONNECTION_NAME" > /dev/null 2>&1
-sleep 2 # Give the network a moment to stabilize.
-
-print_success "Static IP configured. SSH will be available at: $STATIC_IP"
 
 # --- Part 2: OS Migration to NVMe SSD ---
 
 print_border "Step 2: Migrate OS from microSD to NVMe SSD"
+print_info "Running the OS from an SSD is much faster and more reliable than a microSD card."
+read -p "➡️ Do you want to migrate the OS to an NVMe SSD now? (Y/N): " confirm_migrate
 
-# --- SAFETY CHECK: Determine if we are already running on the SSD ---
-CURRENT_ROOT_DEV=$(findmnt -n -o SOURCE /)
-if [[ "$CURRENT_ROOT_DEV" == *"nvme"* ]]; then
-    print_success "System is already running from the NVMe SSD. Skipping migration."
+if [[ "$confirm_migrate" != "Y" && "$confirm_migrate" != "y" ]]; then
+    print_info "Skipping OS migration. The system will continue to run from the microSD card."
 else
-    print_info "Running the OS from an SSD is much faster and more reliable than a microSD card."
-    read -p "➡️ Do you want to migrate the OS to an NVMe SSD now? (Y/N): " confirm_migrate
-
-    if [[ "$confirm_migrate" != "Y" && "$confirm_migrate" != "y" ]]; then
-        print_info "Skipping OS migration. The system will continue to run from the microSD card."
+    # Detect the NVMe SSD device.
+    SSD_DEVICE=$(lsblk -d -o NAME,ROTA | grep '0' | awk '/nvme/ {print "/dev/"$1}')
+    if [ -z "$SSD_DEVICE" ]; then
+        print_error "No NVMe SSD detected. Please ensure it is installed correctly. Skipping migration."
     else
-        # Detect the NVMe SSD device.
-        SSD_DEVICE=$(lsblk -d -o NAME,ROTA | grep '0' | awk '/nvme/ {print "/dev/"$1}')
-        if [ -z "$SSD_DEVICE" ]; then
-            print_error "No NVMe SSD detected. Please ensure it is installed correctly. Skipping migration."
-        else
-            print_success "Detected NVMe SSD at: $SSD_DEVICE"
-            echo ""
-            echo -e "${C_RED}!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!${C_RESET}"
-            echo -e "${C_YELLOW}This next step will completely and IRREVERSIBLY ERASE all data on the SSD.${C_RESET}"
-            echo -e "${C_RED}!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!${C_RESET}"
-            read -p "To confirm, please type 'yes': " confirm_erase
+        print_success "Detected NVMe SSD at: $SSD_DEVICE"
+        echo ""
+        echo -e "${C_RED}!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!${C_RESET}"
+        echo -e "${C_YELLOW}This next step will completely and IRREVERSIBLY ERASE all data on the SSD.${C_RESET}"
+        echo -e "${C_RED}!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!${C_RESET}"
+        read -p "To confirm, please type 'yes': " confirm_erase
 
-            if [[ "$confirm_erase" != "yes" ]]; then
-                print_info "Migration aborted by user. The SSD was not touched."
+        if [[ "$confirm_erase" != "yes" ]]; then
+            print_info "Migration aborted by user. The SSD was not touched."
+        else
+            echo "🔧 Preparing the SSD..."
+            parted -s "$SSD_DEVICE" mklabel gpt
+            parted -s "$SSD_DEVICE" mkpart primary ext4 0% 100%
+            sleep 3 # Wait for the kernel to recognize the new partition.
+            SSD_PARTITION="${SSD_DEVICE}p1"
+            mkfs.ext4 "$SSD_PARTITION"
+            print_success "SSD has been partitioned and formatted."
+            
+            echo "🔧 Cloning filesystem. This will take several minutes..."
+            MOUNT_POINT="/mnt/ssd_root"
+            mkdir -p "$MOUNT_POINT"
+            mount "$SSD_PARTITION" "$MOUNT_POINT"
+            
+            rsync -axHAWX --numeric-ids --info=progress2 --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} / "$MOUNT_POINT"
+            print_success "Filesystem cloned successfully."
+            
+            echo "🔧 Updating boot configuration to use the SSD..."
+            SSD_UUID=$(blkid -s UUID -o value "$SSD_PARTITION")
+            if [ -z "$SSD_UUID" ]; then
+                print_error "Could not determine the SSD's UUID. Cannot update boot config."
+                umount "$MOUNT_POINT" # Clean up
             else
-                echo "🔧 Preparing the SSD..."
-                # Create a new GPT partition table and a single partition covering the whole disk.
-                parted -s "$SSD_DEVICE" mklabel gpt
-                parted -s "$SSD_DEVICE" mkpart primary ext4 0% 100%
-                sleep 3 # Wait for the kernel to recognize the new partition.
-                SSD_PARTITION="${SSD_DEVICE}p1"
-                mkfs.ext4 "$SSD_PARTITION"
-                print_success "SSD has been partitioned and formatted."
-                
-                echo "🔧 Cloning filesystem. This will take several minutes..."
-                MOUNT_POINT="/mnt/ssd_root"
-                mkdir -p "$MOUNT_POINT"
-                mount "$SSD_PARTITION" "$MOUNT_POINT"
-                
-                # Use rsync with specific flags to ensure a perfect clone of the OS.
-                # -a: archive mode (preserves permissions, ownership, etc.)
-                # -x: don't cross filesystem boundaries
-                # -H: preserve hard links
-                # -A: preserve ACLs
-                # -X: preserve extended attributes
-                rsync -axHAWX --numeric-ids --info=progress2 --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} / "$MOUNT_POINT"
-                print_success "Filesystem cloned successfully."
-                
-                echo "🔧 Updating boot configuration to use the SSD..."
-                SSD_UUID=$(blkid -s UUID -o value "$SSD_PARTITION")
-                if [ -z "$SSD_UUID" ]; then
-                    print_error "Could not determine the SSD's UUID. Cannot update boot config."
-                    umount "$MOUNT_POINT" # Clean up
-                else
-                    # The Jetson's bootloader reads this file to find the OS.
-                    # We will replace the original root device with the UUID of our new SSD partition.
-                    sed -i "s|root=[^ ]*|root=UUID=$SSD_UUID|" "/boot/extlinux/extlinux.conf"
-                    umount "$MOUNT_POINT"
-                    rmdir "$MOUNT_POINT"
-                    print_success "Boot configuration updated. The system will boot from the SSD."
-                fi
+                sed -i "s|root=[^ ]*|root=UUID=$SSD_UUID|" "/boot/extlinux/extlinux.conf"
+                umount "$MOUNT_POINT"
+                rmdir "$MOUNT_POINT"
+                print_success "Boot configuration updated. The system will boot from the SSD."
             fi
         fi
     fi
@@ -208,7 +207,6 @@ fi
 
 print_border "Step 3: System Minimization & Hardening"
 
-# Remove the full Ubuntu Desktop environment.
 print_info "To create a lean, secure server, we will remove the desktop GUI and related applications."
 read -p "➡️ Remove the full desktop environment? (Highly Recommended) (Y/N): " confirm_remove
 if [[ "$confirm_remove" == "Y" || "$confirm_remove" == "y" ]]; then
@@ -222,13 +220,10 @@ else
 fi
 echo ""
 
-# Disable Swap memory.
 print_info "Kubernetes requires swap memory to be disabled for performance and stability."
 read -p "➡️ Disable swap? (This is required for Kubernetes) (Y/N): " confirm_swap
 if [[ "$confirm_swap" == "Y" || "$confirm_swap" == "y" ]]; then
-    # Disable swap for the current session
     swapoff -a
-    # Make the change permanent by commenting out the swap line in /etc/fstab.
     sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
     print_success "Swap has been disabled."
 else
@@ -257,6 +252,11 @@ echo "After rebooting:"
 if [[ "$confirm_migrate" == "Y" || "$confirm_migrate" == "y" ]]; then
     echo "  - The system will be running from the NVMe SSD."
     echo "  - You can securely wipe the old OS from the microSD by running 'clean.sh'."
+fi
+# The STATIC_IP variable might not be set if the network was pre-configured,
+# so we find it again for the final message.
+if [ -z "$STATIC_IP" ]; then
+    STATIC_IP=$(hostname -I | awk '{print $1}')
 fi
 echo "  - You can connect to this node via SSH at: ssh <your_user>@$STATIC_IP"
 echo ""
