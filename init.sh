@@ -27,7 +27,7 @@
 #  - Configures a static IP address for reliable network access.
 #  - (Optional) Sets a descriptive hostname for the node.
 #  - Removes the Ubuntu Desktop environment for a minimal, secure server.
-#  - Disables swap memory, a requirement for Kubernetes.
+#  - Disables ALL forms of swap memory (disk-based and NVIDIA's ZRAM), a requirement for Kubernetes.
 #  - Updates the system packages to their latest versions.
 #  - (Optional) Migrates the now-minimized and updated OS to a faster SSD.
 #
@@ -229,13 +229,22 @@ print_info "Kubernetes requires swap memory to be disabled for performance and s
 # See: https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/#before-you-begin
 read -p "> Disable swap? (This is required for Kubernetes) (Y/N): " confirm_swap
 if [[ "$confirm_swap" == "Y" || "$confirm_swap" == "y" ]]; then
-    # `swapoff -a` disables all swap devices for the current session.
+    # `swapoff -a` disables all active swap devices for the current session.
     swapoff -a
-    # To make the change permanent, we must edit `/etc/fstab`, the file that
-    # controls what filesystems are mounted at boot. This `sed` command finds
-    # the line containing "swap" and comments it out by adding a '#' at the start.
+    
+    # To disable traditional disk-based swap permanently, we must edit `/etc/fstab`.
+    # This `sed` command finds any line containing "swap" and comments it out.
     sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
-    print_success "Swap has been disabled."
+    
+    # The Jetson OS uses a custom service to manage ZRAM swap. We must stop and disable it.
+    print_info "Disabling NVIDIA's ZRAM service..."
+    if systemctl list-unit-files | grep -q 'nvzramconfig.service'; then
+        systemctl stop nvzramconfig.service
+        systemctl disable nvzramconfig.service
+        print_success "NVIDIA ZRAM service disabled."
+    else
+        print_info "NVIDIA ZRAM service not found, assuming it's not in use."
+    fi
 else
     print_info "Swap not disabled. Note: 'kubeadm init' will fail until this is done."
 fi
@@ -306,7 +315,7 @@ else
             # -A: preserve Access Control Lists (ACLs).
             # -X: preserve extended attributes.
             # --exclude: explicitly tells rsync to skip volatile system directories.
-            rsync -axHAWX --numeric-ids --info=progress2 --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} / "$MO_POINT"
+            rsync -axHAWX --numeric-ids --info=progress2 --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} / "$MOUNT_POINT"
             print_success "Filesystem cloned successfully."
             
             echo "Updating boot configuration to use the SSD..."
