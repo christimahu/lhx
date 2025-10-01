@@ -28,8 +28,8 @@
 #  - (Optional) Sets a descriptive hostname for the node.
 #  - Removes the Ubuntu Desktop environment for a minimal, secure server.
 #  - Disables swap memory, a requirement for Kubernetes.
-#  - (Optional) Migrates the now-minimized operating system to a faster SSD.
-#  - Updates the remaining system packages to the latest versions.
+#  - Updates the system packages to their latest versions.
+#  - (Optional) Migrates the now-minimized and updated OS to a faster SSD.
 #
 # ====================================================================================
 
@@ -241,12 +241,24 @@ else
 fi
 echo ""
 
+print_info "Applying latest security patches and software updates to the system."
+read -p "> Run 'apt update' and 'apt upgrade' now? (Recommended) (Y/N): " confirm_update
+if [[ "$confirm_update" == "Y" || "$confirm_update" == "y" ]]; then
+    # `apt-get update` refreshes the list of available packages.
+    # `apt-get upgrade` installs the newest versions of all packages currently installed.
+    # We do this BEFORE migrating to the SSD to ensure we copy an up-to-date system.
+    apt-get update && apt-get upgrade -y
+    print_success "System is now up to date."
+else
+    print_info "Skipping system updates."
+fi
+
 
 # --- Part 3: OS Migration to NVMe SSD ---
 
 print_border "Step 3: Migrate OS from microSD to NVMe SSD"
 print_info "Running the OS from an SSD is much faster and more reliable than a microSD card."
-read -p "> Do you want to migrate the now-minimized OS to an NVMe SSD? (Y/N): " confirm_migrate
+read -p "> Do you want to migrate the now-minimized and updated OS to an NVMe SSD? (Y/N): " confirm_migrate
 
 if [[ "$confirm_migrate" != "Y" && "$confirm_migrate" != "y" ]]; then
     print_info "Skipping OS migration. The system will continue to run from the microSD card."
@@ -294,7 +306,7 @@ else
             # -A: preserve Access Control Lists (ACLs).
             # -X: preserve extended attributes.
             # --exclude: explicitly tells rsync to skip volatile system directories.
-            rsync -axHAWX --numeric-ids --info=progress2 --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} / "$MOUNT_POINT"
+            rsync -axHAWX --numeric-ids --info=progress2 --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} / "$MO_POINT"
             print_success "Filesystem cloned successfully."
             
             echo "Updating boot configuration to use the SSD..."
@@ -318,21 +330,6 @@ else
             fi
         fi
     fi
-fi
-
-
-# --- Part 4: System Updates ---
-
-print_border "Step 4: System Updates"
-print_info "Applying latest security patches and software updates to the minimal system."
-read -p "> Run 'apt update' and 'apt upgrade' now? (Recommended) (Y/N): " confirm_update
-if [[ "$confirm_update" == "Y" || "$confirm_update" == "y" ]]; then
-    # `apt-get update` refreshes the list of available packages.
-    # `apt-get upgrade` installs the newest versions of all packages currently installed.
-    apt-get update && apt-get upgrade -y
-    print_success "System is now up to date."
-else
-    print_info "Skipping system updates."
 fi
 
 
