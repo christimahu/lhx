@@ -2,34 +2,32 @@
 
 # ====================================================================================
 #
-#                    Jetson Kubernetes Node Initializer (init.sh)
+#                    Jetson Kubernetes Node Initializer (init_headless.sh)
 #
 # ====================================================================================
 #
 #  Purpose:
 #  --------
-#  This script performs the complete "Day 0" configuration for a new NVIDIA
-#  Jetson device that will be used as a Kubernetes node. It is designed to be
-#  the first and only script you run on a freshly imaged microSD card.
+#  This script is a comprehensive, "first-run" utility designed to transform a
+#  freshly-imaged NVIDIA Jetson device into a hardened, headless server optimized
+#  for use as a Kubernetes node. It automates all the essential "Day 0" setup
+#  tasks, ensuring a consistent and reliable foundation for your cluster.
+#
+#  Tutorial Goal:
+#  --------------
+#  If you're new to Kubernetes or system administration, this script is your
+#  first step. We will walk through preparing a physical machine for a cluster.
+#  This involves configuring the network, minimizing the operating system for
+#  security and performance, and optimizing storage—all prerequisites for a
+#  stable Kubernetes environment.
 #
 #  Workflow:
 #  ---------
-#  1. Flash microSD with the latest Jetson JetPack OS.
-#     (See: https://developer.nvidia.com/jetson-getting-started)
-#  2. Boot the Jetson, connect it to the network via Ethernet, and log in.
+#  1. Flash a microSD card with the latest Jetson JetPack OS.
+#  2. Boot the Jetson, complete the initial Ubuntu user setup, and connect to Ethernet.
 #  3. Clone the repository containing this script onto the Jetson.
-#  4. Run this script: `sudo ./init.sh`
-#  5. After it completes, reboot the device.
-#
-#  What it does:
-#  -------------
-#  - Checks if setup is already complete and exits safely if so.
-#  - Configures a static IP address for reliable network access.
-#  - (Optional) Sets a descriptive hostname for the node.
-#  - Removes the Ubuntu Desktop environment for a minimal, secure server.
-#  - Disables ALL forms of swap memory (disk-based and NVIDIA's ZRAM), a requirement for Kubernetes.
-#  - Updates the system packages to their latest versions.
-#  - (Optional) Migrates the now-minimized and updated OS to a faster SSD.
+#  4. Run this script: `sudo ./init_headless.sh`
+#  5. After it completes, reboot the device. The Jetson is now a prepared node.
 #
 # ====================================================================================
 
@@ -114,6 +112,17 @@ print_success "System is running from microSD card. Proceeding with setup."
 # --- Part 1: Network Configuration ---
 
 print_border "Step 1: Network Configuration (Static IP)"
+
+# --- Tutorial: Why a Static IP is Critical for Kubernetes ---
+# A Kubernetes cluster is a distributed system of multiple machines (nodes).
+# The Control Plane (the cluster's brain) needs to reliably communicate with each
+# Worker Node. If a node's IP address changes (which can happen with default DHCP
+# settings), the Control Plane loses contact with it, marking it as "NotReady".
+# This disrupts workloads running on that node and can cause cluster instability.
+# By assigning a permanent, static IP, we ensure that each node has a stable,
+# predictable address for the lifetime of the cluster. This is a fundamental
+# requirement for any server, but especially for the members of a K8s cluster.
+# ---
 
 # We need to find the name of the primary network interface (e.g., enP8p1s0).
 # The `ip route` command shows the kernel's routing table. We look for the 'default'
@@ -205,6 +214,14 @@ else
 fi
 echo ""
 
+# --- Tutorial: Removing the Desktop GUI ---
+# A server, especially a Kubernetes node, should be as lean as possible. A graphical
+# user interface (GUI) consumes significant system resources (RAM, CPU) that are
+# better allocated to running your containerized applications. Removing the desktop
+# also reduces the system's "attack surface" by eliminating many packages that
+# are not necessary for a server, making the system more secure. We will manage
+# the node remotely via SSH from now on.
+# ---
 print_info "To create a lean, secure server, we will remove the desktop GUI and related applications."
 read -p "> Remove the full desktop environment? (Highly Recommended) (Y/N): " confirm_remove
 if [[ "$confirm_remove" == "Y" || "$confirm_remove" == "y" ]]; then
@@ -225,8 +242,20 @@ else
 fi
 echo ""
 
+# --- Tutorial: Disabling Swap Memory for Kubernetes ---
+# This is a mandatory prerequisite for Kubernetes. The core K8s component on a node,
+# the `kubelet`, needs to have absolute control over the node's resources. It is
+# designed to know exactly how much memory is available. Swap memory, which uses
+# the disk as slower, virtual RAM, makes this accounting difficult and unpredictable.
+# If a container starts using swap, its performance becomes erratic, which defeats
+# the purpose of Kubernetes' resource management. The kubelet is designed to
+# enforce memory limits strictly; if a pod exceeds its memory, it should be terminated
+# and restarted, not allowed to slow down the whole system by using disk swap.
+#
+# For official documentation, see:
+# https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/#before-you-begin
+# ---
 print_info "Kubernetes requires swap memory to be disabled for performance and stability."
-# See: https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/#before-you-begin
 read -p "> Disable swap? (This is required for Kubernetes) (Y/N): " confirm_swap
 if [[ "$confirm_swap" == "Y" || "$confirm_swap" == "y" ]]; then
     # `swapoff -a` disables all active swap devices for the current session.
@@ -266,6 +295,19 @@ fi
 # --- Part 3: OS Migration to NVMe SSD ---
 
 print_border "Step 3: Migrate OS from microSD to NVMe SSD"
+
+# --- Tutorial: Why Use an SSD Instead of a MicroSD Card? ---
+# Reliability and Performance.
+# 1. Performance: An NVMe SSD has dramatically faster read/write speeds than a
+#    microSD card. In a Kubernetes context, this means faster container image
+#    pulls, quicker application startup times, and better performance for any
+#    application that writes logs or data to disk.
+# 2. Reliability: MicroSD cards are not designed for the constant, small read/write
+#    operations of a server OS and are prone to wear and corruption over time.
+#    An SSD is built for this workload and is far more reliable for a server that
+#    will be running 24/7. We use the microSD card only to boot the system, and
+#    then immediately hand off to the SSD for all operations.
+# ---
 print_info "Running the OS from an SSD is much faster and more reliable than a microSD card."
 read -p "> Do you want to migrate the now-minimized and updated OS to an NVMe SSD? (Y/N): " confirm_migrate
 
@@ -350,7 +392,7 @@ echo "After rebooting:"
 # We need to re-check if migration was performed to give the right instructions.
 if [[ "$confirm_migrate" == "Y" || "$confirm_migrate" == "y" ]]; then
     echo "  - The system will be running from the NVMe SSD."
-    echo "  - You can securely wipe the old OS from the microSD by running 'clean.sh'."
+    echo "  - You can securely wipe the old OS from the microSD by running 'clean_microsd.sh'."
 fi
 # The STATIC_IP variable might not be set if the network was pre-configured,
 # so we find it again for the final message.

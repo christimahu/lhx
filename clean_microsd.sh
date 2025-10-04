@@ -2,30 +2,31 @@
 
 # ====================================================================================
 #
-#                     Secure MicroSD Cleanup Script (clean.sh)
+#                     Secure MicroSD Cleanup Script (clean_microsd.sh)
 #
 # ====================================================================================
 #
 #  Purpose:
 #  --------
-#  This script securely removes the old operating system files from the microSD
-#  card after a successful migration to an NVMe SSD. This is a security-hardening
-#  step to ensure there isn't a dormant, un-updated OS on the boot media that
-#  could be exploited by an attacker with physical access.
+#  This script is a security-hardening measure to be run *after* the main OS has
+#  been successfully migrated to an NVMe SSD. It removes the old, now-redundant
+#  operating system from the microSD card, leaving only the essential bootloader
+#  files.
+#
+#  Tutorial Goal:
+#  --------------
+#  Security is built in layers. After migrating our primary OS to a fast and
+#  reliable SSD, we need to clean up the original boot media. Leaving a full,
+#  un-updated copy of the OS on the microSD card is a security risk. If an attacker
+#  gained physical access, they could potentially force the device to boot from
+#  that old OS, which might have unpatched vulnerabilities. This script neutralizes
+#  that threat.
 #
 #  Workflow:
 #  ---------
-#  1. Run the `init.sh` script and migrate the OS to the SSD.
-#  2. Reboot the Jetson.
-#  3. SSH back into the Jetson using its new static IP address.
-#  4. Run this script: `sudo ./clean.sh`
-#
-#  What it does:
-#  -------------
-#  - Verifies that the system is currently running from the NVMe SSD.
-#  - Mounts the microSD card's primary partition.
-#  - Deletes all files and directories from the microSD card EXCEPT for the
-#    critical `/boot` directory, which is required for the system to start.
+#  1. Run the `init_headless.sh` script and migrate the OS to the SSD.
+#  2. Reboot the Jetson. It will now be running from the SSD.
+#  3. SSH into the Jetson and run this script: `sudo ./clean_microsd.sh`
 #
 # ====================================================================================
 
@@ -74,16 +75,21 @@ fi
 print_success "Running as root."
 
 # 2. CRITICAL SAFETY CHECK: Verify we are booted from the SSD.
-# We find the device that is mounted as the root ('/') filesystem.
-# If it's not an NVMe device, we MUST abort. Running this script while booted
-# from the microSD card would be a "self-destruct" command, as it would
-# delete the OS it is currently running from.
+# --- Tutorial: The Importance of This Check ---
+# This is the most important check in this script. We are about to delete the
+# operating system from the microSD card. If we accidentally run this script
+# while the system is *still running from the microSD card*, it would be a
+# "self-destruct" command. The script would be deleting the very files it is
+# currently using, leading to a catastrophic failure and an unbootable system.
+# By verifying the root filesystem ('/') is on an 'nvme' device, we ensure it is
+# safe to wipe the 'mmcblk0p1' (microSD) device.
+# ---
 print_info "Verifying that the system is running from the NVMe SSD..."
 CURRENT_ROOT_DEV=$(findmnt -n -o SOURCE /)
 if [[ "$CURRENT_ROOT_DEV" != *"nvme"* ]]; then
   print_error "CRITICAL: System is NOT booted from the NVMe SSD."
   print_error "Running this script now would permanently destroy your current OS."
-  print_error "Please run 'init.sh' and reboot from the SSD before running this script."
+  print_error "Please run 'init_headless.sh' and reboot from the SSD before running this script."
   exit 1
 fi
 print_success "System is correctly booted from the SSD. It is safe to proceed."
@@ -125,17 +131,22 @@ if ! mountpoint -q "$MOUNT_POINT"; then
 fi
 
 echo "Deleting all files and directories from microSD except '/boot'..."
-# This is the core command for the cleanup. Let's break it down:
-# `find "$MOUNT_POINT"`: Start searching in the mounted microSD directory.
-# `-mindepth 1 -maxdepth 1`: This is crucial. It tells `find` to only look at
-#   the items *directly inside* the mount point (e.g., /mnt/microsd_rootfs/etc)
-#   but not the mount point itself or anything deeper.
+# --- Tutorial: Deconstructing the 'find' Command ---
+# This command is the core of the cleanup process. Let's break it down:
+# `find "$MOUNT_POINT"`: Start searching within the mounted microSD directory.
+# `-mindepth 1 -maxdepth 1`: This is crucial. It tells `find` to only operate on
+#   the items *directly inside* the mount point (like /bin, /etc, /home) and not
+#   the mount point itself or files deeper inside those directories. This makes
+#   the operation much faster.
 # `-not -name "boot"`: This tells `find` to EXCLUDE any item named "boot".
-#   This is what preserves the critical boot files.
-# `-exec rm -rf {} +`: For all items found, execute the `rm -rf` command.
-#   `{}` is replaced with the found file/directory names. The `+` at the end
-#   is an optimization that groups many filenames into a single `rm` command,
-#   which is more efficient than running `rm` once for every single file.
+#   This is what preserves our critical boot files, which the device still needs
+#   to start up before it hands off control to the SSD.
+# `-exec rm -rf {} +`: For everything found that wasn't excluded, execute the
+#   `rm -rf` (remove, recursively, forcefully) command. The `{}` is a placeholder
+#   that gets filled with the found file/directory names. The `+` at the end is an
+#   optimization that groups many filenames into a single `rm` command, making it
+#   much more efficient than running `rm` once for every single file.
+# ---
 find "$MOUNT_POINT" -mindepth 1 -maxdepth 1 -not -name "boot" -exec rm -rf {} +
 print_success "Old OS files have been deleted."
 

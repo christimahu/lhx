@@ -2,31 +2,29 @@
 
 # ====================================================================================
 #
-#                    Jetson Node Health Check Script (check.sh)
+#                    Jetson Node Health Check Script (check_complete.sh)
 #
 # ====================================================================================
 #
 #  Purpose:
 #  --------
-#  This script runs a series of checks to verify that a Jetson node has been
-#  correctly configured by the `init.sh` and `clean.sh` scripts. It provides a
-#  quick, comprehensive report on the state of the system, confirming that it
-#  is ready for Kubernetes deployment.
+#  This script is a non-destructive verification tool. It runs a series of checks
+#  to audit a Jetson node and confirm that it has been correctly configured by the
+#  `init_headless.sh` and `clean_microsd.sh` scripts. It provides a quick and
+#  comprehensive report on the health of the system's configuration.
+#
+#  Tutorial Goal:
+#  --------------
+#  After performing major system changes, it's good practice to verify that
+#  everything is in the state you expect. This script acts as an automated
+#  checklist, ensuring our node meets all the foundational requirements before
+#  we attempt to install Kubernetes on it.
 #
 #  Workflow:
 #  ---------
-#  1. After running `init.sh`, rebooting, and running `clean.sh`, SSH into the node.
-#  2. Run this script: `sudo ./check.sh`
-#  3. Review the output to confirm all checks pass.
-#
-#  What it checks:
-#  ---------------
-#  ✅ Boot Device: Confirms the OS is running from the NVMe SSD.
-#  ✅ Network: Verifies that a static IP is configured.
-#  ✅ Hostname: Displays the current system hostname.
-#  ✅ Headless Mode: Ensures the system is set to boot into command-line mode.
-#  ✅ Swap Status: Confirms that all forms of swap memory are disabled.
-#  ✅ MicroSD Cleanup: Verifies the old OS has been wiped from the microSD card.
+#  1. After running `init_headless.sh`, rebooting, and running `clean_microsd.sh`, SSH into the node.
+#  2. Run this script: `sudo ./check_complete.sh`
+#  3. Review the output. If all checks show [PASS], the node is ready for Phase 2.
 #
 # ====================================================================================
 
@@ -82,6 +80,8 @@ echo ""
 # --- Verification Checks ---
 
 # --- Check 1: Boot Device ---
+# Why we check: The OS must be running from the fast, reliable NVMe SSD, not the
+# slower, less-durable microSD card. This confirms the OS migration was successful.
 print_info "1. Verifying system is running from the NVMe SSD..."
 CURRENT_ROOT_DEV=$(findmnt -n -o SOURCE /)
 if [[ "$CURRENT_ROOT_DEV" == *"nvme"* ]]; then
@@ -92,6 +92,8 @@ fi
 echo ""
 
 # --- Check 2: Network Configuration ---
+# Why we check: A Kubernetes node MUST have a stable, predictable IP address. This
+# check ensures the network is not configured for DHCP, but has a static IP.
 print_info "2. Verifying network configuration..."
 INTERFACE=$(ip route | awk '/default/ {print $5; exit}')
 CONNECTION_NAME=$(nmcli -t -f NAME,DEVICE con show --active | grep -E ":$INTERFACE$" | cut -d: -f1)
@@ -106,6 +108,8 @@ fi
 echo ""
 
 # --- Check 3: Hostname ---
+# Why we check: A descriptive hostname makes it easy to identify nodes when
+# running `kubectl get nodes`. This confirms a hostname has been set.
 print_info "3. Checking system hostname..."
 CURRENT_HOSTNAME=$(hostname)
 if [ -n "$CURRENT_HOSTNAME" ]; then
@@ -117,6 +121,8 @@ fi
 echo ""
 
 # --- Check 4: Headless Mode ---
+# Why we check: The node should be a minimal server. This confirms the system is
+# set to boot into the command-line interface, not a resource-heavy desktop GUI.
 print_info "4. Verifying headless (command-line) boot target..."
 DEFAULT_TARGET=$(systemctl get-default)
 if [[ "$DEFAULT_TARGET" == "multi-user.target" ]]; then
@@ -127,6 +133,8 @@ fi
 echo ""
 
 # --- Check 5: Swap Status ---
+# Why we check: Kubernetes requires swap to be disabled for stable performance and
+# predictable resource management by the kubelet. This check confirms it is off.
 print_info "5. Verifying that swap is disabled..."
 # The `swapon --show` command will produce output if any swap device is active.
 # We check if the output of the command is empty (`-z`).
@@ -139,6 +147,8 @@ fi
 echo ""
 
 # --- Check 6: MicroSD Cleanup ---
+# Why we check: This confirms our security-hardening step was successful. The microSD
+# card should only contain the '/boot' directory and nothing else.
 print_info "6. Verifying microSD card has been cleaned..."
 MICROSD_PARTITION="/dev/mmcblk0p1"
 MOUNT_POINT="/mnt/verify_microsd"
@@ -175,4 +185,5 @@ else
 fi
 
 print_border "Check Complete"
+
 
